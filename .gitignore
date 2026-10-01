@@ -178,3 +178,9 @@ sphinx_*/
 
 # Rust analyzer configuration
 /rust-project.json
+
+# UFI local transient backups and patch exports
+*.pre-*
+*.orig
+*.rej
+/patches/
