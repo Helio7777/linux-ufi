@@ -279,6 +279,7 @@ static void wcn36xx_update_survey(struct wcn36xx *wcn, int rssi, int snr,
 	struct ieee80211_supported_band *sband;
 	int idx;
 	int i;
+	bool found = false;
 	u8 snr_sample = snr & 0xff;
 
 	idx = 0;
@@ -286,13 +287,31 @@ static void wcn36xx_update_survey(struct wcn36xx *wcn, int rssi, int snr,
 		idx = wcn->hw->wiphy->bands[NL80211_BAND_2GHZ]->n_channels;
 
 	sband = wcn->hw->wiphy->bands[band];
+	/*
+	 * WCN3620 is 2.4 GHz only, but firmware can occasionally report RX
+	 * descriptors that look like 5 GHz frames while scanning.  Keep a
+	 * defensive guard here as well so a malformed descriptor can never
+	 * turn into a NULL band dereference.
+	 */
+	if (!sband) {
+		wcn36xx_warn("RX report for unavailable band %d\n", band);
+		return;
+	}
 	channel = sband->channels;
 
 	for (i = 0; i < sband->n_channels; i++, channel++) {
 		if (channel->center_freq == freq) {
 			idx += i;
+			found = true;
 			break;
 		}
+	}
+
+	if (!found) {
+		DO_ONCE_LITE(wcn36xx_warn,
+			     "RX survey frequency %d not present in band %d\n",
+			     freq, band);
+		return;
 	}
 
 	spin_lock(&wcn->survey_lock);
@@ -367,11 +386,28 @@ int wcn36xx_rx_skb(struct wcn36xx *wcn, struct sk_buff *skb)
 		 */
 		u8 hwch = (bd->reserved0 << 4) + bd->rx_ch;
 
-		if (bd->rf_band != 1 && hwch <= sizeof(ab_rx_ch_map) && hwch >= 1) {
+		if (bd->rf_band != 1 && hwch <= ARRAY_SIZE(ab_rx_ch_map) && hwch >= 1 &&
+		    wcn->rf_id != RF_IRIS_WCN3620) {
 			status.band = NL80211_BAND_5GHZ;
 			status.freq = ieee80211_channel_to_frequency(ab_rx_ch_map[hwch - 1],
 								     status.band);
 		} else {
+			/*
+			 * 2.4 GHz channels are 1..14. Do not pass corrupt scan
+			 * metadata to mac80211 or survey accounting.
+			 */
+			if (hwch < 1 || hwch > 14) {
+				DO_ONCE_LITE(wcn36xx_warn,
+					     "Invalid 2.4 GHz scan channel %d "
+					     "(rf_band %d, rf_id %#x)\n",
+					     hwch, bd->rf_band, wcn->rf_id);
+				goto drop;
+			}
+
+			if (bd->rf_band != 1 && wcn->rf_id == RF_IRIS_WCN3620)
+				DO_ONCE_LITE(wcn36xx_warn,
+					     "Received 5 GHz band packet on WCN3620? "
+					     "(rf_band %d, hwch %d)\n", bd->rf_band, hwch);
 			status.band = NL80211_BAND_2GHZ;
 			status.freq = ieee80211_channel_to_frequency(hwch, status.band);
 		}
