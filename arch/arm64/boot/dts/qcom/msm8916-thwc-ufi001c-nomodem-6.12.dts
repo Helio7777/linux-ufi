@@ -1,0 +1,112 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+/dts-v1/;
+
+#include "msm8916-ufi.dtsi"
+
+/ {
+    model = "ufi-001c/ufi-001b Wi-Fi-only MSM8916";
+    compatible = "thwc,ufi001c", "qcom,msm8916";
+};
+
+/* Keep the last diagnostic console across a watchdog or brownout reset.
+ * The device reserves CMA at 0x9d600000..0x9f600000; this 1 MiB region
+ * immediately follows it and stays inside the 512 MiB physical RAM window.
+ */
+&{/reserved-memory} {
+    ramoops@9f600000 {
+        compatible = "ramoops";
+        reg = <0x0 0x9f600000 0x0 0x00100000>;
+        record-size = <0x00040000>;
+        console-size = <0x00020000>;
+        pmsg-size = <0x00020000>;
+        ftrace-size = <0x00020000>;
+        no-map;
+    };
+};
+
+&button_restart {
+    gpios = <&tlmm 37 GPIO_ACTIVE_HIGH>;
+};
+
+&led_b {
+    gpios = <&tlmm 20 GPIO_ACTIVE_HIGH>;
+};
+
+&led_g {
+    gpios = <&tlmm 21 GPIO_ACTIVE_HIGH>;
+};
+
+&led_r {
+    gpios = <&tlmm 22 GPIO_ACTIVE_HIGH>;
+};
+
+&button_default {
+    pins = "gpio37";
+    bias-pull-down;
+};
+
+&gpio_leds_default {
+    pins = "gpio20", "gpio21", "gpio22";
+};
+
+/* No LTE/modem: disable the modem remoteproc and its fixed memory. */
+&bam_dmux {
+    status = "disabled";
+};
+
+&bam_dmux_dma {
+    status = "disabled";
+};
+
+&mpss {
+    status = "disabled";
+};
+
+&mba_mem {
+    status = "disabled";
+};
+
+&mpss_mem {
+    status = "disabled";
+};
+
+&{/reserved-memory/reserved@86680000} {
+    status = "disabled";
+};
+
+&{/reserved-memory/rmtfs@86700000} {
+    status = "disabled";
+};
+
+&{/reserved-memory/rfsa@867e0000} {
+    status = "disabled";
+};
+
+/* The target is a USB peripheral connected to a computer. */
+&usb {
+    /delete-property/ usb-role-switch;
+    dr_mode = "peripheral";
+    status = "okay";
+};
+
+&usb_hs_phy {
+    extcon = <&pm8916_usbin>;
+};
+
+/* Keep WCNSS/Wi-Fi. This headless UFI does not use the Venus codec. */
+&wcnss {
+    status = "okay";
+};
+
+&wcnss_mem {
+    status = "okay";
+};
+
+&venus {
+    status = "disabled";
+};
+
+&venus_mem {
+    status = "disabled";
+};
