@@ -52,6 +52,8 @@ jobs:
 
       - name: Check upstream for updates
         id: check_upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -81,23 +83,26 @@ jobs:
             IS_ANCESTOR=false
           fi
 
-          # 检查 GitHub release tag 是否已存在
-          if git rev-parse "refs/tags/ufi-$TARGET_TAG" >/dev/null 2>&1; then
-            RELEASE_TAG_EXISTS=true
+          # 检查 GitHub Release 是否已发布（使用 gh release view 探测远程 Release 实体）
+          RELEASE_TAG="ufi-$TARGET_TAG"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            RELEASE_EXISTS=true
+            echo "GitHub Release $RELEASE_TAG already published."
           else
-            RELEASE_TAG_EXISTS=false
+            RELEASE_EXISTS=false
+            echo "GitHub Release $RELEASE_TAG not published yet."
           fi
 
           if [ "$IS_ANCESTOR" = "false" ]; then
             echo "should_update=true" >> "$GITHUB_OUTPUT"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
-          elif [ "${{ inputs.force_build }}" = "true" ] || [ "$RELEASE_TAG_EXISTS" = "false" ]; then
+          elif [ "${{ inputs.force_build }}" = "true" ] || [ "$RELEASE_EXISTS" = "false" ]; then
             echo "should_update=false" >> "$GITHUB_OUTPUT"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_update=false" >> "$GITHUB_OUTPUT"
             echo "should_build=false" >> "$GITHUB_OUTPUT"
-            echo "Already up-to-date with $TARGET_TAG and release tag exists. No build needed."
+            echo "Already up-to-date with $TARGET_TAG and release $RELEASE_TAG exists. No build needed."
           fi
 
       - name: Rebase UFI commits onto new upstream stable tag
