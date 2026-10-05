@@ -1,0 +1,201 @@
+name: Kernel Auto Update & Release
+
+on:
+  schedule:
+    # 每天 UTC 02:00 (北京时间 10:00) 自动检测 Linux stable 上游更新
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: '是否强制编译并发布当前版本（即使上游无新补丁）'
+        type: boolean
+        default: false
+      target_tag:
+        description: '指定目标 upstream stable tag（留空则自动检测最新 v6.12.y）'
+        type: string
+        default: ''
+
+concurrency:
+  group: kernel-update-pipeline
+  cancel-in-progress: false
+
+jobs:
+  check-and-build:
+    name: Check, Build and Release UFI Kernel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ufi/linux-6.12.y
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            bison \
+            flex \
+            libssl-dev \
+            bc \
+            kmod \
+            libelf-dev \
+            rsync \
+            device-tree-compiler
+
+      - name: Check upstream for updates
+        id: check_upstream
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 引入官方 upstream 仓库
+          git remote add upstream https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git || true
+          git fetch upstream 'refs/tags/v6.12.*:refs/tags/v6.12.*' --no-tags
+
+          if [ -n "${{ inputs.target_tag }}" ]; then
+            TARGET_TAG="${{ inputs.target_tag }}"
+          else
+            TARGET_TAG=$(git tag -l 'v6.12.*' | sort -V | tail -n 1)
+          fi
+
+          echo "Target stable tag: $TARGET_TAG"
+          echo "target_tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+
+          VER_NAME="${TARGET_TAG#v}"
+          echo "ver_name=$VER_NAME" >> "$GITHUB_OUTPUT"
+
+          # 检查当前 HEAD 是否已包含此 upstream tag
+          if git merge-base --is-ancestor "$TARGET_TAG" HEAD; then
+            echo "Current HEAD already contains upstream tag: $TARGET_TAG"
+            IS_ANCESTOR=true
+          else
+            echo "Found newer upstream stable version: $TARGET_TAG"
+            IS_ANCESTOR=false
+          fi
+
+          # 检查 GitHub release tag 是否已存在
+          if git rev-parse "refs/tags/ufi-$TARGET_TAG" >/dev/null 2>&1; then
+            RELEASE_TAG_EXISTS=true
+          else
+            RELEASE_TAG_EXISTS=false
+          fi
+
+          if [ "$IS_ANCESTOR" = "false" ]; then
+            echo "should_update=true" >> "$GITHUB_OUTPUT"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ inputs.force_build }}" = "true" ] || [ "$RELEASE_TAG_EXISTS" = "false" ]; then
+            echo "should_update=false" >> "$GITHUB_OUTPUT"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_update=false" >> "$GITHUB_OUTPUT"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "Already up-to-date with $TARGET_TAG and release tag exists. No build needed."
+          fi
+
+      - name: Rebase UFI commits onto new upstream stable tag
+        if: steps.check_upstream.outputs.should_update == 'true'
+        run: |
+          TARGET_TAG="${{ steps.check_upstream.outputs.target_tag }}"
+          echo "Rebasing ufi/linux-6.12.y onto $TARGET_TAG..."
+
+          if ! git rebase "$TARGET_TAG"; then
+            echo "::error::Automatic rebase onto $TARGET_TAG stopped due to conflict."
+            git rebase --abort
+            exit 1
+          fi
+
+          git branch -f upstream/linux-6.12.y "$TARGET_TAG"
+          git tag -a "ufi-$TARGET_TAG" -m "UFI kernel release based on $TARGET_TAG"
+
+          git push origin ufi/linux-6.12.y upstream/linux-6.12.y "ufi-$TARGET_TAG"
+
+      - name: Ensure release tag exists if building existing baseline
+        if: steps.check_upstream.outputs.should_build == 'true' && steps.check_upstream.outputs.should_update != 'true'
+        run: |
+          TARGET_TAG="${{ steps.check_upstream.outputs.target_tag }}"
+          RELEASE_TAG="ufi-$TARGET_TAG"
+          if ! git rev-parse "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            git tag -a "$RELEASE_TAG" -m "UFI kernel release based on $TARGET_TAG"
+            git push origin "$RELEASE_TAG"
+          fi
+
+      - name: Build Kernel and Package DEBs
+        if: steps.check_upstream.outputs.should_build == 'true'
+        run: |
+          chmod +x scripts/build-deb.sh
+          ./scripts/build-deb.sh
+
+      - name: Upload Debian Packages Artifact
+        if: steps.check_upstream.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ufi-kernel-${{ steps.check_upstream.outputs.ver_name }}-debs
+          path: |
+            dist/*.deb
+            dist/SHA256SUMS
+
+      - name: Publish GitHub Release
+        if: steps.check_upstream.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TARGET_TAG="${{ steps.check_upstream.outputs.target_tag }}"
+          VER_NAME="${{ steps.check_upstream.outputs.ver_name }}"
+          RELEASE_TAG="ufi-$TARGET_TAG"
+          RELEASE_TITLE="UFI001C Kernel $VER_NAME ($RELEASE_TAG)"
+
+          cat > release_notes.md <<EOF
+          ## UFI001C Linux Kernel Release: $RELEASE_TAG
+
+          本版本基于官方 Linux Stable **$TARGET_TAG** 构建，集成 UFI 硬件定制补丁与生产环境低内存调优。
+
+          ### 补丁特性 (UFI Patches)
+          - **设备树定义**：
+            - 提供专属 Wi-Fi-only 设备树 \`msm8916-thwc-ufi001c-nomodem-6.12.dtb\`。
+            - 默认禁用 Venus 硬件视频解码器，避免无头棒子异常唤醒并节省 RAM。
+          - **WCN36xx Wi-Fi 驱动稳定性修复**：
+            - 过滤非法 2.4GHz 信道元数据与越界 RX survey 统计，防止内核崩溃 Oops。
+          - **生产环境配置 (configs/ufi-6.12.111-stable.config)**：
+            - 启用 ZRAM 压缩 Swap（LZ4 算法后端）。
+            - 启用 Ramoops / Pstore 崩溃内存保留日志记录。
+            - 启用 PM8916 硬件看门狗 (Watchdog) 与 PSI 压力监测。
+            - 剥离 Ftrace、Kprobes、Lockup Detector、Debug 符号等冗余追踪，缩减内核体积至约 14.5MB，适配 512MB RAM 硬件。
+
+          ### 包含软件包
+          $(cd dist && for f in *.deb; do echo "- \`$f\`"; done)
+          - \`SHA256SUMS\`
+
+          ### 校验清单 (SHA256)
+          \`\`\`text
+          $(cat dist/SHA256SUMS)
+          \`\`\`
+
+          ### 设备安装与升级说明 (Debian on UFI001C)
+          \`\`\`bash
+          # 1. 传输 deb 软件包至设备并安装
+          sudo dpkg -i --force-overwrite linux-image-*.deb linux-modules-*.deb ufi001c-dtb-*.deb
+
+          # 2. 同步至引导分区并重启
+          sudo sync-lkboot
+          sudo reboot
+          \`\`\`
+          EOF
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists, updating assets..."
+            gh release upload "$RELEASE_TAG" dist/*.deb dist/SHA256SUMS --clobber
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE" --notes-file release_notes.md
+          else
+            echo "Creating new release $RELEASE_TAG..."
+            gh release create "$RELEASE_TAG" dist/*.deb dist/SHA256SUMS \
+              --title "$RELEASE_TITLE" \
+              --notes-file release_notes.md
+          fi
