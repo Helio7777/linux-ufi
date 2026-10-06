@@ -90,7 +90,7 @@ export LOCALVERSION=""
 cfg --set-str CONFIG_LOCALVERSION "$LOCALVER"
 cfg --disable CONFIG_LOCALVERSION_AUTO
 
-# Disable debug symbols and heavy tracing (essential for 512MB RAM UFI device)
+# Disable debug symbols, heavy tracing, THP, and unused headless subsystems (essential for 512MB RAM UFI device)
 for sym in \
   CONFIG_DEBUG_KERNEL \
   CONFIG_DEBUG_FS \
@@ -120,11 +120,15 @@ for sym in \
   CONFIG_BPF_EVENTS \
   CONFIG_PSTORE_CONSOLE \
   CONFIG_PSTORE_PMSG \
-  CONFIG_PSTORE_FTRACE; do
+  CONFIG_PSTORE_FTRACE \
+  CONFIG_TRANSPARENT_HUGEPAGE \
+  CONFIG_DRM \
+  CONFIG_SOUND \
+  CONFIG_MEDIA_SUPPORT; do
   cfg --disable "$sym"
 done
 
-# Ensure UFI required features
+# Ensure UFI required features & high availability
 cfg --module CONFIG_ZRAM
 cfg --enable CONFIG_ZRAM_BACKEND_LZO
 cfg --enable CONFIG_ZRAM_BACKEND_LZ4
@@ -138,6 +142,7 @@ cfg --enable CONFIG_QCOM_WDT
 cfg --enable CONFIG_PM8916_WATCHDOG
 cfg --enable CONFIG_PERF_EVENTS
 cfg --enable CONFIG_PSI
+cfg --set-val CONFIG_PANIC_TIMEOUT 5
 
 make -C "$SRC" O="$BUILD_DIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
