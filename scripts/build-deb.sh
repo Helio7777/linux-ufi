@@ -124,11 +124,17 @@ for sym in \
   CONFIG_TRANSPARENT_HUGEPAGE \
   CONFIG_DRM \
   CONFIG_SOUND \
-  CONFIG_MEDIA_SUPPORT; do
+  CONFIG_MEDIA_SUPPORT \
+  CONFIG_INPUT_TOUCHSCREEN \
+  CONFIG_IIO \
+  CONFIG_PINCTRL_IPQ5210 \
+  CONFIG_PINCTRL_IPQ5424 \
+  CONFIG_PINCTRL_IPQ9650 \
+  CONFIG_IPQ_GCC_9650; do
   cfg --disable "$sym"
 done
 
-# Ensure UFI required features & high availability
+# Ensure UFI required features, hardware crypto acceleration & high availability
 cfg --module CONFIG_ZRAM
 cfg --enable CONFIG_ZRAM_BACKEND_LZO
 cfg --enable CONFIG_ZRAM_BACKEND_LZ4
@@ -143,6 +149,17 @@ cfg --enable CONFIG_PM8916_WATCHDOG
 cfg --enable CONFIG_PERF_EVENTS
 cfg --enable CONFIG_PSI
 cfg --set-val CONFIG_PANIC_TIMEOUT 5
+
+# ARMv8-A Crypto Extensions hardware acceleration (AES/SHA for Wi-Fi & network performance)
+cfg --enable CONFIG_ARM64_CRYPTO
+cfg --enable CONFIG_CRYPTO_AES_ARM64_CE
+cfg --enable CONFIG_CRYPTO_SHA1_ARM64_CE
+cfg --enable CONFIG_CRYPTO_SHA2_ARM64_CE
+cfg --enable CONFIG_CRYPTO_GHASH_ARM64_CE
+
+# TCP BBR congestion control and FQ packet scheduler (built-in for zero-dependency bootup)
+cfg --enable CONFIG_TCP_CONG_BBR
+cfg --enable CONFIG_NET_SCH_FQ
 
 make -C "$SRC" O="$BUILD_DIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
