@@ -4,6 +4,13 @@ on:
   schedule:
     # 每天 UTC 02:00 (北京时间 10:00) 自动检测 Linux 7.2.y stable 上游更新
     - cron: '0 2 * * *'
+  push:
+    branches:
+      - 'ufi/linux-7.2.y'
+    paths:
+      - 'configs/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
   workflow_dispatch:
     inputs:
       force_build:
@@ -96,7 +103,7 @@ jobs:
           if [ "$IS_ANCESTOR" = "false" ]; then
             echo "should_update=true" >> "$GITHUB_OUTPUT"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
-          elif [ "${{ inputs.force_build }}" = "true" ] || [ "$RELEASE_EXISTS" = "false" ]; then
+          elif [ "${{ inputs.force_build }}" = "true" ] || [ "$RELEASE_EXISTS" = "false" ] || [ "${{ github.event_name }}" = "push" ]; then
             echo "should_update=false" >> "$GITHUB_OUTPUT"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           else
