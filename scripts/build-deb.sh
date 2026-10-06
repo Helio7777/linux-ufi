@@ -158,7 +158,9 @@ cfg --enable CONFIG_CRYPTO_SHA2_ARM64_CE
 cfg --enable CONFIG_CRYPTO_GHASH_ARM64_CE
 
 # TCP BBR congestion control and FQ packet scheduler (built-in for zero-dependency bootup)
+cfg --enable CONFIG_TCP_CONG_ADVANCED
 cfg --enable CONFIG_TCP_CONG_BBR
+cfg --enable CONFIG_NET_SCHED
 cfg --enable CONFIG_NET_SCH_FQ
 
 make -C "$SRC" O="$BUILD_DIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
