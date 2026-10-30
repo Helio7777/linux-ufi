@@ -1,0 +1,197 @@
+name: Kernel Auto Update & Release (7.3.y)
+
+on:
+  # Scheduled workflows are read from the default branch, even though the
+  # kernel sources maintained here live on ufi/linux-7.3.y.
+  schedule:
+    - cron: '30 2 * * *'
+  push:
+    branches: ['ufi/linux-7.3.y']
+    paths:
+      - 'configs/**'
+      - 'scripts/**'
+      - '.github/workflows/kernel-7.3-update.yml'
+      - 'arch/arm64/boot/dts/qcom/msm8916*'
+      - 'drivers/net/wireless/ath/wcn36xx/**'
+      - 'Makefile'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Rebuild even when the current release exists'
+        type: boolean
+        default: false
+      target_tag:
+        description: 'Upstream v7.3 or v7.3.x tag (empty selects the latest stable version)'
+        type: string
+        default: ''
+
+concurrency:
+  group: kernel-update-pipeline-7-3
+  cancel-in-progress: false
+
+env:
+  KERNEL_BRANCH: ufi/linux-7.3.y
+  UPSTREAM_BRANCH: upstream/linux-7.3.y
+
+jobs:
+  check-and-build:
+    name: Check, Build and Release UFI Kernel 7.3.y
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ufi/linux-7.3.y
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            bison flex libssl-dev bc kmod libelf-dev rsync device-tree-compiler
+
+      - name: Check upstream for updates
+        id: check_upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_TAG: ${{ inputs.target_tag }}
+          FORCE_BUILD: ${{ inputs.force_build }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          echo "expected_head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git remote add upstream https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+          git fetch upstream refs/tags/v7.3:refs/tags/v7.3 \
+            'refs/tags/v7.3.*:refs/tags/v7.3.*' --no-tags
+
+          TARGET_TAG="$REQUESTED_TAG"
+          if [ -z "$TARGET_TAG" ]; then
+            TARGET_TAG=$(git tag -l 'v7.3' 'v7.3.*' | grep -E '^v7\.3(\.[0-9]+)?$' | sort -V | tail -n 1)
+          fi
+          if [[ ! "$TARGET_TAG" =~ ^v7\.3(\.[0-9]+)?$ ]]; then
+            echo '::error::Expected an upstream stable v7.3 or v7.3.x tag.'
+            exit 1
+          fi
+          git rev-parse --verify "refs/tags/$TARGET_TAG^{commit}"
+          echo "Target stable tag: $TARGET_TAG"
+          echo "target_tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+          VER_NAME="${TARGET_TAG#v}"
+          if [ "$VER_NAME" = 7.3 ]; then
+            VER_NAME=7.3.0
+          fi
+          echo "ver_name=$VER_NAME" >> "$GITHUB_OUTPUT"
+
+          SHOULD_UPDATE=false
+          SHOULD_BUILD=false
+          if ! git merge-base --is-ancestor "$TARGET_TAG" HEAD; then
+            SHOULD_UPDATE=true
+            SHOULD_BUILD=true
+          elif [ "$FORCE_BUILD" = true ] || [ "$EVENT_NAME" = push ] ||
+               ! gh release view "ufi-$TARGET_TAG" >/dev/null 2>&1; then
+            SHOULD_BUILD=true
+          fi
+          echo "should_update=$SHOULD_UPDATE" >> "$GITHUB_OUTPUT"
+          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+
+      - name: Rebase UFI commits onto new upstream stable tag
+        if: steps.check_upstream.outputs.should_update == 'true'
+        env:
+          TARGET_TAG: ${{ steps.check_upstream.outputs.target_tag }}
+        run: |
+          if ! git rebase "$TARGET_TAG"; then
+            git rebase --abort
+            echo "::error::Automatic rebase onto $TARGET_TAG failed. No refs published."
+            exit 1
+          fi
+
+      - name: Build Kernel and Package DEBs
+        if: steps.check_upstream.outputs.should_build == 'true'
+        env:
+          EXPECTED_VERSION: ${{ steps.check_upstream.outputs.ver_name }}
+        run: |
+          ACTUAL_VERSION=$(make -s ARCH=arm64 kernelversion)
+          if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Source is $ACTUAL_VERSION, but requested $EXPECTED_VERSION. Refusing a mislabeled release."
+            exit 1
+          fi
+          bash scripts/build-deb.sh
+
+      - name: Upload Debian Packages Artifact
+        if: steps.check_upstream.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ufi-kernel-${{ steps.check_upstream.outputs.ver_name }}-debs
+          if-no-files-found: error
+          path: |
+            dist/*.deb
+            dist/SHA256SUMS
+
+      - name: Publish tested Git refs
+        if: steps.check_upstream.outputs.should_build == 'true'
+        env:
+          TARGET_TAG: ${{ steps.check_upstream.outputs.target_tag }}
+          EXPECTED_HEAD: ${{ steps.check_upstream.outputs.expected_head }}
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="ufi-$TARGET_TAG"
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            git merge-base --is-ancestor "$TARGET_TAG" "$RELEASE_TAG^{commit}"
+            echo "Reusing existing release tag $RELEASE_TAG."
+          else
+            git tag -a "$RELEASE_TAG" -m "UFI kernel release based on $TARGET_TAG"
+          fi
+          UPSTREAM_COMMIT=$(git rev-parse "$TARGET_TAG^{commit}")
+          # A rebase needs a non-fast-forward branch update. Lease only that
+          # branch, and publish atomically so a retry cannot leave half the refs.
+          git push --atomic \
+            --force-with-lease="refs/heads/$KERNEL_BRANCH:$EXPECTED_HEAD" \
+            origin "HEAD:refs/heads/$KERNEL_BRANCH" \
+            "$UPSTREAM_COMMIT:refs/heads/$UPSTREAM_BRANCH" "refs/tags/$RELEASE_TAG"
+
+      - name: Publish GitHub Release
+        if: steps.check_upstream.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TAG: ${{ steps.check_upstream.outputs.target_tag }}
+          VER_NAME: ${{ steps.check_upstream.outputs.ver_name }}
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="ufi-$TARGET_TAG"
+          RELEASE_TITLE="UFI001C Kernel $VER_NAME ($RELEASE_TAG)"
+          printf '## UFI001C Linux Kernel %s\n\nBased on upstream **%s**.\n\n' \
+            "$VER_NAME" "$TARGET_TAG" > release_notes.md
+          cat >> release_notes.md <<'EOF'
+          Includes UFI001C Wi-Fi-only device trees, WCN36xx channel validation
+          fixes and the portable-router configuration (BBR/FQ, WireGuard, CAKE,
+          policy routing, USB NCM/RNDIS and ARM64 crypto support).
+
+          These are build capabilities; device setup and runtime validation are separate.
+
+          ### Installation (Debian on UFI001C)
+          ```bash
+          sudo dpkg -i --force-overwrite linux-image-*.deb linux-modules-*.deb ufi001c-dtb-*.deb
+          sudo sync-lkboot
+          sudo reboot
+          ```
+
+          ### Packages
+          EOF
+          for file in dist/*.deb; do
+            printf -- '- `%s`\n' "${file#dist/}" >> release_notes.md
+          done
+          printf '\n### SHA256\n```text\n' >> release_notes.md
+          cat dist/SHA256SUMS >> release_notes.md
+          printf '```\n' >> release_notes.md
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/*.deb dist/SHA256SUMS --clobber
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE" --notes-file release_notes.md
+          else
+            gh release create "$RELEASE_TAG" dist/*.deb dist/SHA256SUMS \
+              --title "$RELEASE_TITLE" --notes-file release_notes.md
+          fi
