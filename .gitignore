@@ -120,6 +120,7 @@ modules.order
 !.mailmap
 !.pylintrc
 !.rustfmt.toml
+!/.github/
 
 #
 # Generated include files
@@ -193,3 +194,9 @@ sphinx_*/
 
 # bc language scripts (not LLVM bitcode)
 !kernel/time/timeconst.bc
+
+# UFI out-of-tree kernel packaging
+/build-tmp/
+/modules-tmp/
+/dist/
+/release_notes.md
